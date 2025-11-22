@@ -6,52 +6,50 @@ let arcos = [
   { id: 4, x: 483, y: 518, w: 250, h: 441 }
 ];
 
-// Estado Global
 let globalTime = 0;
 let autoGrowTime = 0;
+let softBodies = [];
+const SEGMENTS = 40;
 
-// Variáveis de Física
-let physHeight = [];
-let physShear = [];
-
-// UI Vars
 let painel, sldEsp, sldGlobalSpeed;
-// Menus Dropdown
-let divGrowth, divMotion, divPhysics, divVisuals;
-// Growth Vars
-let sldGrowth, chkAutoGrow, selGrowMode, selGrowDir, selGrowEase, sldGrowStutter;
-// Motion / Physics / Visuals Vars
-let selMotionType, sldMotionAmp, sldMotionFreq;
-let chkPhysics, sldLevitation, sldTurbulence, sldInertia, sldWindForce;
-let chkEcho, sldEchoRastros, sldEchoLag, chkIntel, sldIntelAmp;
+let sldGrowth, chkAutoGrow, selGrowMode, selGrowEase, sldGrowStutter;
+let chkPhysics, sldPhysicsIntensity, sldGravity, sldWindForce, sldTurbulence, sldStiffness, sldDamping;
+let chkShowPoints, chkShowStiffness;
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
-
-  // REGRA SAGRADA: PONTAS RETAS
   strokeCap(SQUARE);
   noFill();
-
   criarInterfaceCompleta();
+  inicializarSoftBodies();
+}
 
-  // Inicializar Física
-  for(let i=0; i<arcos.length; i++) {
-    physHeight.push(new SmoothValue(0));
-    physShear.push(new SmoothValue(0));
+function inicializarSoftBodies() {
+  softBodies = [];
+  let esp = sldEsp.value();
+  let basesOriginais = arcos.map(a =>
+    (a.id <= 2) ? a.x + a.w / 2 : a.x - a.w / 2
+  );
+
+  let primeiraBase = basesOriginais[0];
+  let distReal = esp * 1.5;
+
+  for (let i = 0; i < arcos.length; i++) {
+    let baseX = primeiraBase + i * distReal;
+    let baseY = arcos[i].y;
+    let softBody = new SoftBody(arcos[i], i, baseX, baseY);
+    softBodies.push(softBody);
   }
 }
 
 function draw() {
   background(20);
 
-  // --- 1. GLOBAL ---
   let esp = sldEsp.value();
   let speed = sldGlobalSpeed.value();
   globalTime += speed;
 
-  // Temporizador do Ciclo Growth
-  let loopDuration = 1.0 + 0.2;
-
+  let loopDuration = 1.2;
   if (chkAutoGrow.checked()) {
     autoGrowTime += 0.005;
     if (autoGrowTime > loopDuration) autoGrowTime = -0.2;
@@ -59,161 +57,382 @@ function draw() {
     autoGrowTime = sldGrowth.value() / 100;
   }
 
-  stroke(100, 200, 180);
-  strokeWeight(esp);
-  noFill();
-
-  // --- 2. GEOMETRIA BASE ---
-  let basesOriginais = arcos.map(a => (a.id <= 2) ? a.x + a.w/2 : a.x - a.w/2);
+  let basesOriginais = arcos.map(a =>
+    (a.id <= 2) ? a.x + a.w / 2 : a.x - a.w / 2
+  );
   let primeiraBase = basesOriginais[0];
   let distReal = esp * 1.5;
-
   let novasBases = [];
-  for (let i = 0; i < arcos.length; i++) {
+
+  for (let i = 0; i < arcos.length; i++)
     novasBases[i] = primeiraBase + i * distReal;
+
+  let isPhysics = chkPhysics.checked();
+  let physicsIntensity = sldPhysicsIntensity.value() / 100;
+  let gravity = sldGravity.value();
+  let windForce = sldWindForce.value();
+  let turbulence = sldTurbulence.value();
+  let stiffness = sldStiffness.value();
+  let damping = sldDamping.value();
+
+  strokeWeight(esp);
+
+  for (let i = 0; i < softBodies.length; i++) {
+    let sb = softBodies[i];
+    let baseX = novasBases[i];
+    let baseY = arcos[i].y;
+
+    sb.updateBase(baseX, baseY);
+
+    if (isPhysics && physicsIntensity > 0) {
+      sb.applyForces(globalTime, gravity, windForce, turbulence, physicsIntensity);
+      sb.update(stiffness, damping, physicsIntensity);
+    } else {
+      sb.resetToOriginal();
+    }
+
+    let growInput = constrain(autoGrowTime, 0, 1);
+    let growData = calculateGrowth(growInput, i);
+
+    stroke(100, 200, 180);
+    sb.display(growData, chkShowPoints.checked(), chkShowStiffness.checked());
+  }
+}
+
+class SoftBody {
+  constructor(arcoData, index, initialBaseX, initialBaseY) {
+    this.arcoData = arcoData;
+    this.index = index;
+    this.isLeft = arcoData.id <= 2;
+    this.drawCx = this.isLeft ? -arcoData.w / 2 : arcoData.w / 2;
+    this.drawCy = 0;
+    this.points = [];
+    this.originalOffsets = [];
+    this.restDistances = [];
+    this.baseX = initialBaseX;
+    this.baseY = initialBaseY;
+    this.createPoints();
   }
 
-  // --- 3. PARÂMETROS ---
-  let isPhysics = chkPhysics.checked();
+  createPoints() {
+    for (let i = 0; i <= SEGMENTS; i++) {
+      let t = i / SEGMENTS;
+      let angle;
+
+      if (this.isLeft) {
+        angle = TWO_PI - (PI * t);
+      } else {
+        angle = PI + (PI * t);
+      }
+
+      let offsetX = this.drawCx + cos(angle) * (this.arcoData.w / 2);
+      let offsetY = this.drawCy + sin(angle) * (this.arcoData.h / 2);
+      this.originalOffsets.push({ x: offsetX, y: offsetY });
+
+      // Mobilidade é linear (0 na base, 1 no topo)
+      let isFixed = (i === 0);
+      let mobilityFactor = t;
+
+      let point = new Point(
+        this.baseX + offsetX,
+        this.baseY + offsetY,
+        isFixed,
+        mobilityFactor
+      );
+      this.points.push(point);
+    }
+
+    for (let i = 0; i < this.points.length - 1; i++) {
+      let p1 = this.originalOffsets[i];
+      let p2 = this.originalOffsets[i + 1];
+      let d = dist(p1.x, p1.y, p2.x, p2.y);
+      this.restDistances.push(d);
+    }
+  }
+
+  updateBase(newBaseX, newBaseY) {
+    this.baseX = newBaseX;
+    this.baseY = newBaseY;
+    // Atualiza imediatamente o ponto zero para não haver lag
+    this.points[0].x = newBaseX + this.originalOffsets[0].x;
+    this.points[0].y = newBaseY + this.originalOffsets[0].y;
+    this.points[0].px = this.points[0].x;
+    this.points[0].py = this.points[0].y;
+  }
+
+  resetToOriginal() {
+    for (let i = 1; i < this.points.length; i++) {
+      this.points[i].x = this.baseX + this.originalOffsets[i].x;
+      this.points[i].y = this.baseY + this.originalOffsets[i].y;
+      this.points[i].px = this.points[i].x;
+      this.points[i].py = this.points[i].y;
+      this.points[i].ax = 0;
+      this.points[i].ay = 0;
+    }
+  }
+
+  applyForces(time, gravity, windForce, turbulence, intensity) {
+    // Loop começa em 1, mas vamos ignorar os primeiros pontos dentro do loop também
+    // para poupar processamento e evitar conflitos com o Hard Lock.
+    for (let i = 1; i < this.points.length; i++) {
+      let p = this.points[i];
+      let m = p.mobilityFactor;
+
+      // Otimização: Se a mobilidade for muito baixa (base), nem calcula força
+      if (m < 0.1) continue;
+
+      let effectiveMobility = m * m * intensity;
+
+      p.ay += gravity * 0.001 * effectiveMobility;
+
+      let windPhase = time * 1.0 + this.index * 0.5 + i * 0.08;
+      p.ax += sin(windPhase) * windForce * 0.01 * effectiveMobility;
+      p.ay += cos(windPhase * 0.6) * windForce * 0.005 * effectiveMobility;
+
+      let noiseScale = 0.2;
+      let tx = time * noiseScale + i * 0.05 + this.index * 10;
+      let ty = time * noiseScale + i * 0.05 + this.index * 10 + 1000;
+
+      p.ax += map(noise(tx), 0, 1, -1, 1) * turbulence * 0.01 * effectiveMobility;
+      p.ay += map(noise(ty), 0, 1, -1, 1) * turbulence * 0.01 * effectiveMobility;
+    }
+  }
+
+  update(stiffness, damping, intensity) {
+    // 1. VERLET
+    for (let i = 1; i < this.points.length; i++) {
+      if (damping < 0) {
+        let originalX = this.baseX + this.originalOffsets[i].x;
+        let originalY = this.baseY + this.originalOffsets[i].y;
+        let returnStrength = abs(damping);
+
+        this.points[i].px = this.points[i].x;
+        this.points[i].py = this.points[i].y;
+        this.points[i].x = lerp(this.points[i].x, originalX, returnStrength * 0.3);
+        this.points[i].y = lerp(this.points[i].y, originalY, returnStrength * 0.3);
+        this.points[i].x += this.points[i].ax * (1 - returnStrength);
+        this.points[i].y += this.points[i].ay * (1 - returnStrength);
+        this.points[i].ax = 0;
+        this.points[i].ay = 0;
+      } else {
+        this.points[i].update(damping);
+      }
+    }
+
+    // 2. PULL TO ORIGINAL
+    let originalPull = lerp(0.25, 0.0, intensity);
+    for (let i = 1; i < this.points.length; i++) {
+      let originalX = this.baseX + this.originalOffsets[i].x;
+      let originalY = this.baseY + this.originalOffsets[i].y;
+      this.points[i].x = lerp(this.points[i].x, originalX, originalPull);
+      this.points[i].y = lerp(this.points[i].y, originalY, originalPull);
+    }
+
+    // 3. DISTANCE CONSTRAINTS
+    let lengthFactor = this.arcoData.h / 600;
+    let iterations = floor(25 / lengthFactor);
+    iterations = constrain(iterations, 20, 50);
+
+    for (let iter = 0; iter < iterations; iter++) {
+      for (let i = 0; i < this.points.length - 1; i++) {
+        let p1 = this.points[i];
+        let p2 = this.points[i + 1];
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
+        let currentDist = sqrt(dx * dx + dy * dy);
+        if (currentDist < 0.0001) continue;
+        let restDist = this.restDistances[i];
+        let segmentProgress = i / (this.points.length - 1);
+        let progressCurve = segmentProgress * segmentProgress;
+        let localStiffness = lerp(1.0, stiffness, progressCurve);
+        let error = (currentDist - restDist) / currentDist;
+        let correctionX = dx * error * 0.5 * localStiffness;
+        let correctionY = dy * error * 0.5 * localStiffness;
+
+        // Não aplicamos correção se o ponto estiver na zona "bloqueada" (Ver passo 5)
+        // Isso evita que a fisica "lute" com o nosso Hard Lock
+        let stemThreshold = 6;
+
+        if (!p1.fixed && i >= stemThreshold) {
+          p1.x += correctionX;
+          p1.y += correctionY;
+        }
+        if (!p2.fixed && (i+1) >= stemThreshold) {
+          p2.x -= correctionX;
+          p2.y -= correctionY;
+        }
+      }
+    }
+
+    // 4. SUAVIZAÇÃO (LAPLACIAN)
+    for (let pass = 0; pass < 10; pass++) {
+      for (let i = 1; i < this.points.length - 1; i++) {
+        if (this.points[i].fixed) continue;
+        let p0 = this.points[i - 1];
+        let p1 = this.points[i];
+        let p2 = this.points[i + 1];
+        let avgX = (p0.x + p2.x) * 0.5;
+        let avgY = (p0.y + p2.y) * 0.5;
+        p1.x = lerp(p1.x, avgX, 0.2);
+        p1.y = lerp(p1.y, avgY, 0.2);
+      }
+    }
+
+    // ============================================================
+    // 5. HARD STEM LOCK (SOLUÇÃO DEFINITIVA)
+    // Sobrepomos brutalmente a posição dos primeiros N pontos.
+    // Isto garante que não há rotação, nem ziguezague, nem cotovelos.
+    // ============================================================
+
+    let hardLockCount = 4;  // Primeiros 4 pontos são estátuas (Base Rígida)
+    let transitionCount = 8; // Até ao ponto 8 fazemos mistura suave
+
+    for (let i = 0; i < transitionCount; i++) {
+        if (i >= this.points.length) break;
+
+        let rigidX = this.baseX + this.originalOffsets[i].x;
+        let rigidY = this.baseY + this.originalOffsets[i].y;
+
+        let physX = this.points[i].x;
+        let physY = this.points[i].y;
+
+        // Se i < hardLockCount, blend é 0 (fica 100% rigidX)
+        // Se i varia de hardLockCount a transitionCount, blend vai de 0 a 1
+        let blend = 0;
+        if (i >= hardLockCount) {
+           let t = map(i, hardLockCount, transitionCount, 0, 1);
+           blend = t * t; // Curva suave
+        }
+
+        this.points[i].x = lerp(rigidX, physX, blend);
+        this.points[i].y = lerp(rigidY, physY, blend);
+
+        // Resetar velocidade para não acumular energia explosiva
+        if (blend < 0.5) {
+            this.points[i].px = this.points[i].x;
+            this.points[i].py = this.points[i].y;
+        }
+    }
+  }
+
+  display(growData, showPoints, showStiffness) {
+    let startIdx = floor(growData.start * this.points.length);
+    let endIdx = floor(growData.end * this.points.length);
+
+    if (endIdx >= this.points.length) endIdx = this.points.length - 1;
+    if (endIdx <= startIdx) return;
+
+    if (showStiffness) {
+      for (let i = startIdx; i < endIdx && i < this.points.length - 1; i++) {
+        let p1 = this.points[i];
+        let p2 = this.points[i + 1];
+        let segmentProgress = i / (this.points.length - 1);
+        let hue = map(segmentProgress, 0, 1, 0, 120);
+        stroke(hue, 255, 255);
+        colorMode(HSB);
+        line(p1.x, p1.y, p2.x, p2.y);
+        colorMode(RGB);
+      }
+      stroke(100, 200, 180);
+    } else {
+      noFill();
+      beginShape();
+
+      // FIX VISUAL:
+      // Como os pontos 0 a hardLockCount estão agora matematicamente bloqueados na vertical (ou na curva original),
+      // basta duplicar o primeiro ponto visível para o curveVertex apanhar a tangente correcta.
+      // Não precisamos de pontos fantasmas extra porque a "coluna" de pontos fixos já define a direção.
+
+      if (this.points[startIdx]) {
+        curveVertex(this.points[startIdx].x, this.points[startIdx].y);
+      }
+
+      for (let i = startIdx; i <= endIdx && i < this.points.length; i++) {
+        curveVertex(this.points[i].x, this.points[i].y);
+      }
+
+      if (this.points[endIdx]) {
+        curveVertex(this.points[endIdx].x, this.points[endIdx].y);
+      }
+
+      endShape();
+    }
+
+    if (showPoints) {
+      for (let i = startIdx; i <= endIdx && i < this.points.length; i++) {
+        let p = this.points[i];
+        let pointColor = (i < 4) ? color(255, 0, 0) : color(255, 200, 0, 150); // Mostra a vermelho os pontos fixos
+        fill(pointColor);
+        noStroke();
+        circle(p.x, p.y, (i < 4) ? 6 : 5);
+        stroke(100, 200, 180);
+      }
+    }
+  }
+}
+
+class Point {
+  constructor(x, y, fixed = false, mobilityFactor = 1.0) {
+    this.x = x;
+    this.y = y;
+    this.px = x;
+    this.py = y;
+    this.ax = 0;
+    this.ay = 0;
+    this.fixed = fixed;
+    this.mobilityFactor = mobilityFactor;
+  }
+
+  update(damping) {
+    if (this.fixed) return;
+
+    let vx = (this.x - this.px) * damping;
+    let vy = (this.y - this.py) * damping;
+    this.px = this.x;
+    this.py = this.y;
+    this.x += vx + this.ax;
+    this.y += vy + this.ay;
+    this.ax = 0;
+    this.ay = 0;
+  }
+}
+
+function calculateGrowth(rawInput, i) {
   let growMode = selGrowMode.value();
-  let growDir = selGrowDir.value();
   let growEase = selGrowEase.value();
   let growStutter = sldGrowStutter.value();
+  let myTime = rawInput;
 
-  // Physics Inputs
-  let mType = selMotionType.value();
-  let mAmp = sldMotionAmp.value();
-  let mFreq = sldMotionFreq.value();
-  let lev = sldLevitation.value();
-  let turb = sldTurbulence.value();
-  let inert = sldInertia.value();
-  let wind = sldWindForce.value();
-
-  // --- 4. ATUALIZAR FÍSICA ---
-  for (let i = 0; i < arcos.length; i++) {
-    let masterSig = 0;
-    if (mType === 'Sine (Breath)') {
-      masterSig = sin(globalTime*mFreq+i*0.5);
-    } else if (mType === 'Pulse (Beat)') {
-      let w = sin(globalTime*mFreq);
-      masterSig = (w > 0.8 ? 1 : 0);
-    } else if (mType === 'Noise (Organic)') {
-      masterSig = map(noise(globalTime*mFreq+i), 0, 1, -1, 1);
-    }
-
-    let tH = 0;
-    let tS = 0;
-
-    if (isPhysics) {
-      tH = lev + (map(noise(globalTime*0.5+i*10), 0, 1, -0.5, 0.5) * turb) + (masterSig * mAmp);
-      tS = map(noise(globalTime*0.2+i), 0, 1, -0.5, 0.5) * (wind/100);
-    } else {
-      if (mType !== 'None') tH = masterSig * mAmp;
-    }
-
-    physHeight[i].update(tH, inert);
-    physShear[i].update(tS, inert);
+  if (growMode === 'Sequential') {
+    let start = i * 0.25;
+    let end = start + 0.25;
+    myTime = map(rawInput, start, end, 0, 1, true);
+  } else if (growMode === 'Cascade') {
+    let start = i * 0.15;
+    let end = start + 0.5;
+    myTime = map(rawInput, start, end, 0, 1, true);
   }
 
-  // --- 5. DESENHO ---
-  for (let i = 0; i < arcos.length; i++) {
-    let a = arcos[i];
-    let baseX = novasBases[i];
-    let baseY = a.y;
+  let segStart = 0,
+    segEnd = 1;
 
-    let currentH = a.h + physHeight[i].val;
-    let currentShear = physShear[i].val;
-
-    let vIntel = 0;
-    if (chkIntel.checked()) {
-       vIntel = map(noise(frameCount*0.5+i), 0, 1, -10, 10) * (sldIntelAmp.value()/10);
-    }
-    let drawH = currentH + vIntel;
-
-    // --- CÁLCULO GROWTH ---
-    let growInput = constrain(autoGrowTime, 0, 1);
-
-    // Cascata
-    let cascadedInput = growInput;
-    if (growMode === 'Sequential') {
-      let start = i * 0.25;
-      let end = start + 0.25;
-      cascadedInput = map(growInput, start, end, 0, 1, true);
-    } else if (growMode === 'Cascade') {
-      let start = i * 0.15;
-      let end = start + 0.5;
-      cascadedInput = map(growInput, start, end, 0, 1, true);
-    }
-
-    // Direção e Segmentação (Lógica Completa Restaurada)
-    let segStart = 0;
-    let segEnd = 1;
-
-    if (growDir === 'Loop: Base -> Tip -> Clear') {
-      if (cascadedInput < 0.5) {
-         let t = map(cascadedInput, 0, 0.5, 0, 1);
-         segStart = 0;
-         segEnd = applyEasing(t, growEase);
-      } else {
-         let t = map(cascadedInput, 0.5, 1.0, 0, 1);
-         segStart = applyEasing(t, growEase);
-         segEnd = 1;
-      }
-    }
-    else if (growDir === 'Anim Out -> Anim In') {
-      if (cascadedInput < 0.5) {
-         // Fase OUT (Varrer da base)
-         let t = map(cascadedInput, 0, 0.5, 0, 1);
-         segStart = applyEasing(t, growEase);
-         segEnd = 1;
-      } else {
-         // Fase IN (Crescer da base)
-         let t = map(cascadedInput, 0.5, 1.0, 0, 1);
-         segStart = 0;
-         segEnd = applyEasing(t, growEase);
-      }
-    }
-    else if (growDir === 'One Way: Tip -> Base') {
-      let t = applyEasing(cascadedInput, growEase);
-      segStart = 0;
-      segEnd = 1.0 - t;
-    }
-    else { // One Way: Base -> Tip
-      let t = applyEasing(cascadedInput, growEase);
-      segStart = 0;
-      segEnd = t;
-    }
-
-    if (growStutter > 0) {
-      let steps = map(growStutter, 1, 100, 50, 2);
-      segStart = floor(segStart * steps) / steps;
-      segEnd = floor(segEnd * steps) / steps;
-    }
-
-    if (segEnd - segStart <= 0.001) continue;
-
-    // --- RENDERIZAÇÃO ---
-    stroke(100, 200, 180);
-
-    push();
-    translate(baseX, baseY);
-    shearX(currentShear);
-
-    let drawCx = (a.id <= 2) ? -a.w / 2 : a.w / 2;
-
-    if (drawH != 0) {
-      let angleStart, angleStop;
-      if (a.id <= 2) {
-        angleStop = TWO_PI - (PI * segStart);
-        angleStart = TWO_PI - (PI * segEnd);
-      } else {
-        angleStart = PI + (PI * segStart);
-        angleStop = PI + (PI * segEnd);
-      }
-      arc(drawCx, 0, a.w, drawH, angleStart, angleStop);
-    }
-    pop();
+  if (myTime < 0.5) {
+    let t = map(myTime, 0, 0.5, 0, 1);
+    segStart = applyEasing(t, growEase);
+    segEnd = 1;
+  } else {
+    let t = map(myTime, 0.5, 1.0, 0, 1);
+    segStart = 0;
+    segEnd = applyEasing(t, growEase);
   }
+
+  if (growStutter > 0) {
+    let s = map(growStutter, 1, 100, 50, 2);
+    segStart = floor(segStart * s) / s;
+    segEnd = floor(segEnd * s) / s;
+  }
+
+  return { start: segStart, end: segEnd };
 }
 
 function applyEasing(t, type) {
@@ -228,7 +447,9 @@ function applyEasing(t, type) {
     case 'Elastic':
       if (t === 0 || t === 1) return t;
       let p = 0.3;
-      return pow(2, -10 * t) * sin((t - p / 4) * (2 * PI) / p) + 1;
+      return (
+        pow(2, -10 * t) * sin((t - p / 4) * (2 * PI) / p) + 1
+      );
     default:
       return t;
   }
@@ -237,19 +458,9 @@ function applyEasing(t, type) {
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
   if (painel) painel.position(windowWidth - 270, 20);
+  inicializarSoftBodies();
 }
 
-class SmoothValue {
-  constructor(v) {
-    this.val = v;
-  }
-
-  update(t, s) {
-    this.val = lerp(this.val, t, s);
-  }
-}
-
-// --- UI COMPLETA ---
 function criarInterfaceCompleta() {
   painel = createDiv();
   painel.position(windowWidth - 270, 20);
@@ -257,170 +468,145 @@ function criarInterfaceCompleta() {
 
   criarHeader(painel, "GLOBAL");
   sldEsp = criarSlider(painel, "Espessura", 1, 60, 8, 1);
-  sldGlobalSpeed = criarSlider(painel, "Velocidade", 0, 0.5, 0.05, 0.001);
+  sldGlobalSpeed = criarSlider(painel, "Velocidade", 0, 0.5, 0.1, 0.001);
   criarSeparador(painel);
 
-  // 1. GROWTH
   let btnGrow = criarBotaoToggle(painel, "GROWTH");
-  divGrowth = criarContainerOculto(painel);
+  let divG = criarContainerOculto(painel);
 
   let divG1 = createDiv();
-  divG1.parent(divGrowth);
-  divG1.style('display', 'flex');
-  divG1.style('gap', '10px');
-  divG1.style('margin-bottom', '5px');
+  divG1.parent(divG);
+  divG1.style("display", "flex");
+  divG1.style("gap", "10px");
+  divG1.style("margin-bottom", "5px");
 
-  chkAutoGrow = createCheckbox('Active', false);
+  chkAutoGrow = createCheckbox("Active", false);
   chkAutoGrow.parent(divG1);
-  chkAutoGrow.style('color', '#00ffcc');
-
-  // Evento: Começa a meio (Cheio) se ativar o loop
+  chkAutoGrow.style("color", "#00ffcc");
   chkAutoGrow.changed(() => {
-    if(chkAutoGrow.checked()) autoGrowTime = 0.0;
+    if (chkAutoGrow.checked()) autoGrowTime = 0;
   });
 
-  selGrowDir = createSelect();
-  selGrowDir.parent(divG1);
-  selGrowDir.option('One Way: Base -> Tip');
-  selGrowDir.option('Anim Out -> Anim In');
-  selGrowDir.option('Loop: Base -> Tip -> Clear');
-  selGrowDir.option('Cycle: In -> Out');
-  selGrowDir.option('One Way: Tip -> Base');
-  selGrowDir.selected('One Way: Base -> Tip');
-  selGrowDir.style('flex-grow', '1');
-  estilizarSelect(selGrowDir);
-
   let divG2 = createDiv();
-  divG2.parent(divGrowth);
-  divG2.style('display', 'flex');
-  divG2.style('gap', '10px');
-  divG2.style('margin-bottom', '10px');
+  divG2.parent(divG);
+  divG2.style("display", "flex");
+  divG2.style("gap", "10px");
+  divG2.style("margin-bottom", "10px");
 
   selGrowMode = createSelect();
   selGrowMode.parent(divG2);
-  selGrowMode.option('Simultaneous');
-  selGrowMode.option('Cascade');
-  selGrowMode.option('Sequential');
-  selGrowMode.style('flex-grow', '1');
+  selGrowMode.option("Simultaneous");
+  selGrowMode.option("Cascade");
+  selGrowMode.option("Sequential");
+  selGrowMode.style("flex-grow", "1");
   estilizarSelect(selGrowMode);
 
   selGrowEase = createSelect();
   selGrowEase.parent(divG2);
-  selGrowEase.option('SmoothStep');
-  selGrowEase.option('Linear');
-  selGrowEase.option('Ease Out');
-  selGrowEase.option('Elastic');
-  selGrowEase.style('flex-grow', '1');
+  selGrowEase.option("SmoothStep");
+  selGrowEase.option("Linear");
+  selGrowEase.option("Ease Out");
+  selGrowEase.option("Elastic");
+  selGrowEase.style("flex-grow", "1");
   estilizarSelect(selGrowEase);
 
-  sldGrowStutter = criarSlider(divGrowth, "Stutter", 0, 100, 0, 1);
-  sldGrowth = criarSlider(divGrowth, "Progresso Manual", 0, 100, 100, 1);
+  sldGrowStutter = criarSlider(divG, "Stutter", 0, 100, 0, 1);
+  sldGrowth = criarSlider(divG, "Progresso Manual", 0, 100, 100, 1);
 
-  configurarToggle(btnGrow, divGrowth, "GROWTH");
+  configurarToggle(btnGrow, divG, "GROWTH");
   criarSeparador(painel);
 
-  setupOtherPanels();
-}
-
-function setupOtherPanels() {
-  // 2. MOTION
-  let btnM = criarBotaoToggle(painel, "2. MOTION");
-  let divM = criarContainerOculto(painel);
-
-  selMotionType = createSelect();
-  selMotionType.parent(divM);
-  selMotionType.option('None');
-  selMotionType.option('Sine (Breath)');
-  selMotionType.option('Pulse (Beat)');
-  selMotionType.option('Noise (Organic)');
-  estilizarSelect(selMotionType);
-
-  sldMotionAmp = criarSlider(divM, "Amp", 0, 400, 100, 10);
-  sldMotionFreq = criarSlider(divM, "Freq", 0.1, 10, 2, 0.1);
-  configurarToggle(btnM, divM, "2. MOTION");
-  criarSeparador(painel);
-
-  // 3. PHYSICS
-  let btnP = criarBotaoToggle(painel, "3. PHYSICS");
+  let btnP = criarBotaoToggle(painel, "SOFT BODY PHYSICS");
   let divP = criarContainerOculto(painel);
 
+  let infoDiv = createDiv(
+    "Base: 1 pt fixo (vermelho)<br>Gravity: - = up, + = down<br>Damping: - = volta ao original<br>Intensity 0% = forma original"
+  );
+  infoDiv.parent(divP);
+  infoDiv.style("font-size", "9px");
+  infoDiv.style("color", "#666");
+  infoDiv.style("margin-bottom", "8px");
+  infoDiv.style("line-height", "1.4");
+
   chkPhysics = criarCheckbox(divP, "Active");
-  sldLevitation = criarSlider(divP, "Lev", 0, 600, 150, 10);
-  sldTurbulence = criarSlider(divP, "Turb", 0, 200, 50, 10);
-  sldInertia = criarSlider(divP, "Inertia", 0.01, 0.2, 0.05, 0.01);
-  sldWindForce = criarSlider(divP, "Wind", 0, 100, 20, 1);
-  configurarToggle(btnP, divP, "3. PHYSICS");
-  criarSeparador(painel);
+  chkPhysics.checked(true);
 
-  // 4. VISUALS
-  let btnV = criarBotaoToggle(painel, "4. VISUALS");
-  let divV = criarContainerOculto(painel);
+  sldPhysicsIntensity = criarSlider(divP, "🎚️ Physics Intensity", 0, 100, 0, 1);
+  criarSeparador(divP);
 
-  chkEcho = criarCheckbox(divV, "Echo");
-  sldEchoRastros = criarSlider(divV, "Trails", 0, 50, 15, 1);
-  sldEchoLag = criarSlider(divV, "Lag", 0, 5, 1, 0.1);
-  chkIntel = criarCheckbox(divV, "Intel");
-  sldIntelAmp = criarSlider(divV, "Intel Amp", 0, 50, 20, 1);
-  configurarToggle(btnV, divV, "4. VISUALS");
+  sldGravity = criarSlider(divP, "Gravity (- = up)", -200, 200, 0, 1);
+  sldWindForce = criarSlider(divP, "Wind Force", 0, 200, 60, 1);
+  sldTurbulence = criarSlider(divP, "Turbulence", 0, 200, 40, 1);
+  sldStiffness = criarSlider(divP, "Stiffness (tip)", 0.05, 1, 0.6, 0.01);
+  sldDamping = criarSlider(divP, "Damping (- = return)", -1, 0.99, 0.93, 0.01);
+
+  criarSeparador(divP);
+
+  chkShowPoints = criarCheckbox(divP, "Show Points (Debug)");
+  chkShowStiffness = criarCheckbox(divP, "Show Stiffness (Colors)");
+
+  configurarToggle(btnP, divP, "SOFT BODY PHYSICS");
+  divP.style("display", "block");
+  btnP.html("▲ SOFT BODY PHYSICS");
 }
 
 function estilizarPainel(p) {
-  p.style('background-color', 'rgba(0, 0, 0, 0.9)');
-  p.style('padding', '15px');
-  p.style('border-radius', '8px');
-  p.style('color', 'white');
-  p.style('font-family', 'sans-serif');
-  p.style('width', '240px');
-  p.style('z-index', '1000');
+  p.style("background-color", "rgba(0, 0, 0, 0.9)");
+  p.style("padding", "15px");
+  p.style("border-radius", "8px");
+  p.style("color", "white");
+  p.style("font-family", "sans-serif");
+  p.style("width", "240px");
+  p.style("z-index", "1000");
 }
 
 function criarHeader(p, t) {
   let el = createP(t);
   el.parent(p);
-  el.style('margin', '0 0 10px 0');
-  el.style('font-weight', 'bold');
-  el.style('color', '#fff');
-  el.style('border-left', '3px solid #00ffcc');
-  el.style('padding-left', '8px');
+  el.style("margin", "0 0 10px 0");
+  el.style("font-weight", "bold");
+  el.style("color", "#fff");
+  el.style("border-left", "3px solid #00ffcc");
+  el.style("padding-left", "8px");
 }
 
 function criarSeparador(p) {
   let s = createDiv();
   s.parent(p);
-  s.style('height', '1px');
-  s.style('background-color', '#333');
-  s.style('margin', '10px 0');
+  s.style("height", "1px");
+  s.style("background-color", "#333");
+  s.style("margin", "10px 0");
 }
 
 function criarContainerOculto(p) {
   let d = createDiv();
   d.parent(p);
-  d.style('display', 'none');
-  d.style('padding', '10px');
-  d.style('background', 'rgba(255,255,255,0.03)');
+  d.style("display", "none");
+  d.style("padding", "10px");
+  d.style("background", "rgba(255,255,255,0.03)");
   return d;
 }
 
 function criarBotaoToggle(p, t) {
-  let b = createButton('▼ ' + t);
+  let b = createButton("▼ " + t);
   b.parent(p);
-  b.style('width', '100%');
-  b.style('background', 'transparent');
-  b.style('border', '1px solid #444');
-  b.style('color', '#aaa');
-  b.style('padding', '6px');
-  b.style('cursor', 'pointer');
+  b.style("width", "100%");
+  b.style("background", "transparent");
+  b.style("border", "1px solid #444");
+  b.style("color", "#aaa");
+  b.style("padding", "6px");
+  b.style("cursor", "pointer");
   return b;
 }
 
 function configurarToggle(b, d, t) {
   b.mousePressed(() => {
-    if(d.style('display') === 'none') {
-      d.style('display', 'block');
-      b.html('▲ ' + t);
+    if (d.style("display") === "none") {
+      d.style("display", "block");
+      b.html("▲ " + t);
     } else {
-      d.style('display', 'none');
-      b.html('▼ ' + t);
+      d.style("display", "none");
+      b.html("▼ " + t);
     }
   });
 }
@@ -430,24 +616,28 @@ function criarCheckbox(p, t) {
   d.parent(p);
   let c = createCheckbox(t, false);
   c.parent(d);
-  c.style('color', '#fff');
+  c.style("color", "#fff");
   return c;
 }
 
 function criarSlider(p, t, min, max, val, step) {
   let d = createDiv();
   d.parent(p);
-  createSpan(t).parent(d).style('font-size', '9px').style('color', '#888').style('display', 'block');
+  createSpan(t)
+    .parent(d)
+    .style("font-size", "9px")
+    .style("color", "#888")
+    .style("display", "block");
   let s = createSlider(min, max, val, step);
   s.parent(d);
-  s.style('width', '100%');
+  s.style("width", "100%");
   return s;
 }
 
 function estilizarSelect(s) {
-  s.style('background', '#222');
-  s.style('color', '#fff');
-  s.style('border', '1px solid #444');
-  s.style('padding', '4px');
-  s.style('border-radius', '4px');
+  s.style("background", "#222");
+  s.style("color", "#fff");
+  s.style("border", "1px solid #444");
+  s.style("padding", "4px");
+  s.style("border-radius", "4px");
 }
